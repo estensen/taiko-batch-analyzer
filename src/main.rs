@@ -18,6 +18,10 @@ struct Cli {
     /// L1 block number to scan for BatchProposed
     #[arg(long, value_parser = clap::value_parser!(u64))]
     l1_block: u64,
+
+    /// Optional: scan a range of blocks (e.g., --range 100 to scan 100 blocks before and after)
+    #[arg(long, value_parser = clap::value_parser!(u64))]
+    range: Option<u64>,
 }
 
 #[tokio::main]
@@ -49,17 +53,57 @@ async fn main() -> eyre::Result<()> {
     // Build the contract interface using the generated instance
     let inbox = taiko::ITaikoInbox::new(inbox_addr, l1.clone());
 
-    // Filter BatchProposed in the specified L1 block
+    // Determine block range
+    let (from_block, to_block) = if let Some(range) = cli.range {
+        let from = cli.l1_block.saturating_sub(range);
+        let to = cli.l1_block.saturating_add(range);
+        (from, to)
+    } else {
+        (cli.l1_block, cli.l1_block)
+    };
+
+    println!("Scanning for BatchProposed events:");
+    println!("  Contract: {}", inbox_addr);
+    println!("  L1 blocks: {} to {}", from_block, to_block);
+
+    // Filter BatchProposed in the specified L1 block range
     let filter = inbox
         .BatchProposed_filter()
-        .from_block(cli.l1_block)
-        .to_block(cli.l1_block)
+        .from_block(from_block)
+        .to_block(to_block)
         .filter;
 
     let logs = l1.get_logs(&filter).await?;
 
+    // Also try to get ALL logs from this contract in this block range for debugging
+    let all_logs_filter = alloy::rpc::types::Filter::new()
+        .address(inbox_addr)
+        .from_block(from_block)
+        .to_block(to_block);
+
+    let all_logs = l1.get_logs(&all_logs_filter).await?;
+    println!(
+        "  Total logs from contract in block range: {}",
+        all_logs.len()
+    );
+
+    if !all_logs.is_empty() && logs.is_empty() {
+        println!(
+            "  Found {} logs but no BatchProposed events. Event signatures found:",
+            all_logs.len()
+        );
+        for log in all_logs.iter().take(5) {
+            if let Some(topic0) = log.topics().first() {
+                println!("    - {}", topic0);
+            }
+        }
+    }
+
     if logs.is_empty() {
-        println!("No BatchProposed events found in L1 block {}", cli.l1_block);
+        println!(
+            "No BatchProposed events found in L1 blocks {} to {}",
+            from_block, to_block
+        );
         return Ok(());
     }
 
