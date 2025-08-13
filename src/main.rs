@@ -151,7 +151,9 @@ async fn main() -> eyre::Result<()> {
 
             let mut total_paid = U256::from(0);
             let mut total_txs = 0usize;
+            // Print per-block transaction counts
             for b in &per_block {
+                println!("  L2 block {}: {} txs", b.block_number, b.tx_count);
                 total_paid = total_paid.saturating_add(b.total_paid_wei);
                 total_txs += b.tx_count;
             }
