@@ -9,18 +9,22 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
 };
 use clap::Parser;
-use compute::{L2Client, compute_batch_revenue, format_wei_eth};
+use compute::{L2Client, compute_batch_revenue, compute_block_revenue, format_wei_eth};
 
 #[derive(Parser, Debug)]
 #[command(name = "taiko-batch-revenue")]
-#[command(about = "Compute Taiko L2 batch revenue from L1 BatchProposed events", long_about = None)]
+#[command(about = "Compute Taiko L2 revenue: either single L2 block or from L1 BatchProposed events", long_about = None)]
 struct Cli {
-    /// L1 block number to scan for BatchProposed
-    #[arg(long, value_parser = clap::value_parser!(u64))]
-    l1_block: u64,
+    /// L2 block number to compute revenue for (mutually exclusive with --l1-block)
+    #[arg(long, value_parser = clap::value_parser!(u64), conflicts_with = "l1_block")]
+    l2_block: Option<u64>,
 
-    /// Optional: scan a range of blocks (e.g., --range 100 to scan 100 blocks before and after)
-    #[arg(long, value_parser = clap::value_parser!(u64))]
+    /// L1 block number to scan for BatchProposed (required unless --l2-block is provided)
+    #[arg(long, value_parser = clap::value_parser!(u64), required_unless_present = "l2_block", conflicts_with = "l2_block")]
+    l1_block: Option<u64>,
+
+    /// Optional: scan a range of L1 blocks (e.g., --range 100 to scan 100 blocks before and after)
+    #[arg(long, value_parser = clap::value_parser!(u64), requires = "l1_block")]
     range: Option<u64>,
 }
 
@@ -30,36 +34,49 @@ async fn main() -> eyre::Result<()> {
 
     let cli = Cli::parse();
 
-    let l1_url = env::var("L1_RPC_URL").expect("L1_RPC_URL not set");
     let l2_client = L2Client::from_env()
         .await
         .expect("L2_RPC_URL not set or invalid");
-    let inbox_addr: Address = env::var("TAIKO_INBOX_ADDRESS")
-        .expect("TAIKO_INBOX_ADDRESS not set")
-        .parse()
-        .expect("Invalid TAIKO_INBOX_ADDRESS");
-
-    let l1 = ProviderBuilder::new().connect_http(l1_url.parse()?);
-    // Validate both RPC endpoints are reachable
-    let _ = l1
-        .get_chain_id()
-        .await
-        .expect("L1 RPC not reachable or invalid");
+    // Always validate L2 RPC is reachable
     l2_client
         .ping()
         .await
         .expect("L2 RPC not reachable or invalid");
 
+    // If user requested a single L2 block, compute and exit early
+    if let Some(l2_block) = cli.l2_block {
+        println!("Computing revenue for L2 block {l2_block}...");
+        let res = compute_block_revenue(&l2_client, l2_block)
+            .await
+            .expect("compute revenue");
+        println!("  txs: {}", res.tx_count);
+        println!("  total paid: {}", format_wei_eth(&res.total_paid_wei));
+        return Ok(());
+    }
+
+    // Otherwise, we are scanning L1 for BatchProposed events
+    let l1_block = cli.l1_block.expect("--l1-block is required unless --l2-block is provided");
+    let l1_url = env::var("L1_RPC_URL").expect("L1_RPC_URL not set");
+    let inbox_addr: Address = env::var("TAIKO_INBOX_ADDRESS")
+        .expect("TAIKO_INBOX_ADDRESS not set")
+        .parse()
+        .expect("Invalid TAIKO_INBOX_ADDRESS");
+    let l1 = ProviderBuilder::new().connect_http(l1_url.parse()?);
+    // Validate L1 RPC endpoint is reachable
+    let _ = l1
+        .get_chain_id()
+        .await
+        .expect("L1 RPC not reachable or invalid");
     // Build the contract interface using the generated instance
     let inbox = taiko::ITaikoInbox::new(inbox_addr, l1.clone());
 
     // Determine block range
     let (from_block, to_block) = if let Some(range) = cli.range {
-        let from = cli.l1_block.saturating_sub(range);
-        let to = cli.l1_block.saturating_add(range);
+        let from = l1_block.saturating_sub(range);
+        let to = l1_block.saturating_add(range);
         (from, to)
     } else {
-        (cli.l1_block, cli.l1_block)
+        (l1_block, l1_block)
     };
 
     println!("Scanning for BatchProposed events:");
